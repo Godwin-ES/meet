@@ -503,27 +503,19 @@ function AgentSessionView({
 }
 
 function MetricStrip({ metrics }: { metrics: ReturnType<typeof useAgentEvents>['metrics'] }) {
-  const items: [string, number][] = metrics
-    ? [
-        ['STT', metrics.stt_ms],
-        ['LLM', metrics.llm_ttft_ms],
-        ['TTS', metrics.tts_ttfb_ms],
-        ['End to end', metrics.e2e_ms],
-      ]
-    : [
-        ['STT', 0],
-        ['LLM', 0],
-        ['TTS', 0],
-        ['End to end', 0],
-      ];
+  // null means "not measured this turn" (a typed message has no STT), so it
+  // shows a dash rather than a misleading 0 ms.
+  const items: [string, number | null][] = [
+    ['STT', metrics?.stt_ms ?? null],
+    ['LLM', metrics?.llm_ttft_ms ?? null],
+    ['TTS', metrics?.tts_ttfb_ms ?? null],
+    ['End to end', metrics?.e2e_ms ?? null],
+  ];
   return (
     <div className="metric-strip">
       {items.map(([label, value]) => (
         <div className="metric" title={`${label} latency`} key={label}>
-          <b>
-            {value || '—'}
-            {value ? ' ms' : ''}
-          </b>
+          <b>{value === null ? '—' : `${value} ms`}</b>
           <span>{label}</span>
         </div>
       ))}

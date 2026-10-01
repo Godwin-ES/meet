@@ -97,6 +97,36 @@ describe('agent event protocol', () => {
     expect(state.metrics?.e2e_ms).toBe(1450);
   });
 
+  it('accepts unmeasured timings as null, as a typed turn sends them', () => {
+    const event = parseAgentEvent({
+      v: 1,
+      type: 'turn.metrics',
+      turn: 1,
+      stt_ms: null,
+      llm_ttft_ms: 200,
+      tts_ttfb_ms: 100,
+      e2e_ms: null,
+      tools: 0,
+      at: 1,
+    });
+    expect(event).toEqual(
+      expect.objectContaining({ stt_ms: null, e2e_ms: null, llm_ttft_ms: 200 }),
+    );
+    expect(
+      parseAgentEvent({
+        v: 1,
+        type: 'turn.metrics',
+        turn: 1,
+        stt_ms: 'x',
+        llm_ttft_ms: 1,
+        tts_ttfb_ms: 1,
+        e2e_ms: 1,
+        tools: 0,
+        at: 1,
+      }),
+    ).toBeNull();
+  });
+
   it('ignores unknown event types and future protocol versions', () => {
     expect(parseAgentEvent({ v: 2, type: 'tool.started' })).toBeNull();
     expect(parseAgentEvent({ v: 1, type: 'system.secret' })).toBeNull();

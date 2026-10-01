@@ -51,10 +51,11 @@ export type TurnMetricsEvent = {
   v: 1;
   type: 'turn.metrics';
   turn: number;
-  stt_ms: number;
-  llm_ttft_ms: number;
-  tts_ttfb_ms: number;
-  e2e_ms: number;
+  /** null when not measured: a typed turn has no STT, and end to end needs every stage. */
+  stt_ms: number | null;
+  llm_ttft_ms: number | null;
+  tts_ttfb_ms: number | null;
+  e2e_ms: number | null;
   tools: number;
   at: number;
 };
@@ -97,6 +98,9 @@ const isRecord = (value: unknown): value is JsonRecord =>
 const isNumber = (value: unknown): value is number =>
   typeof value === 'number' && Number.isFinite(value);
 
+const isNumberOrNull = (value: unknown): value is number | null =>
+  value === null || isNumber(value);
+
 export function parseAgentEvent(value: unknown): AgentEvent | null {
   if (!isRecord(value) || value.v !== AGENT_EVENT_VERSION || typeof value.type !== 'string') {
     return null;
@@ -110,8 +114,12 @@ export function parseAgentEvent(value: unknown): AgentEvent | null {
       : null;
   }
   if (value.type === 'turn.metrics') {
-    const keys = ['turn', 'stt_ms', 'llm_ttft_ms', 'tts_ttfb_ms', 'e2e_ms', 'tools'];
-    return keys.every((key) => isNumber(value[key])) ? (value as TurnMetricsEvent) : null;
+    const timings = ['stt_ms', 'llm_ttft_ms', 'tts_ttfb_ms', 'e2e_ms'];
+    return isNumber(value.turn) &&
+      isNumber(value.tools) &&
+      timings.every((key) => isNumberOrNull(value[key]))
+      ? (value as TurnMetricsEvent)
+      : null;
   }
 
   const commonIsValid =
