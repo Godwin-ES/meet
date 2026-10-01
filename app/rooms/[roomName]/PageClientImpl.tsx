@@ -1,236 +1,591 @@
 'use client';
 
-import React from 'react';
-import { decodePassphrase } from '@/lib/client-utils';
-import { DebugMode } from '@/lib/Debug';
-import { KeyboardShortcuts } from '@/lib/KeyboardShortcuts';
-import { RecordingIndicator } from '@/lib/RecordingIndicator';
-import { SettingsMenu } from '@/lib/SettingsMenu';
-import { ConnectionDetails } from '@/lib/types';
-import {
-  formatChatMessageLinks,
-  LocalUserChoices,
-  PreJoin,
-  RoomContext,
-  VideoConference,
-} from '@livekit/components-react';
-import {
-  ExternalE2EEKeyProvider,
-  RoomOptions,
-  VideoCodec,
-  VideoPresets,
-  Room,
-  DeviceUnsupportedError,
-  RoomConnectOptions,
-  RoomEvent,
-  TrackPublishDefaults,
-  VideoCaptureOptions,
-} from 'livekit-client';
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { useSetupE2EE } from '@/lib/useSetupE2EE';
-import { useLowCPUOptimizer } from '@/lib/usePerfomanceOptimiser';
+import Link from 'next/link';
+import { AnimatePresence, motion } from 'motion/react';
+import {
+  Activity,
+  Brain,
+  ChevronRight,
+  Mic,
+  MicOff,
+  PhoneOff,
+  RotateCcw,
+  Send,
+  Wrench,
+} from 'lucide-react';
+import {
+  BarVisualizer,
+  MediaDeviceSelect,
+  RoomAudioRenderer,
+  RoomContext,
+  useChat,
+  useLocalParticipant,
+  useTranscriptions,
+  useVoiceAssistant,
+} from '@livekit/components-react';
+import { Room, RoomEvent } from 'livekit-client';
+import { Pipeline, PipelineStage } from '@/components/Pipeline';
+import { ResultCard } from '@/components/cards/ResultCard';
+import { APP_NAME } from '@/lib/app-config';
+import { useAgentEvents } from '@/lib/agent-events';
+import { ConnectionDetails } from '@/lib/types';
 
 const CONN_DETAILS_ENDPOINT =
   process.env.NEXT_PUBLIC_CONN_DETAILS_ENDPOINT ?? '/api/connection-details';
-const SHOW_SETTINGS_MENU = process.env.NEXT_PUBLIC_SHOW_SETTINGS_MENU == 'true';
 
-export function PageClientImpl(props: {
+type MobileTab = 'conversation' | 'activity' | 'memory';
+
+export function PageClientImpl({
+  roomName,
+  initialPrompt,
+}: {
   roomName: string;
-  region?: string;
-  hq: boolean;
-  codec: VideoCodec;
+  initialPrompt?: string;
 }) {
-  const [preJoinChoices, setPreJoinChoices] = React.useState<LocalUserChoices | undefined>(
-    undefined,
-  );
-  const preJoinDefaults = React.useMemo(() => {
-    return {
-      username: '',
-      videoEnabled: false,
-      audioEnabled: true,
-    };
-  }, []);
-  const [connectionDetails, setConnectionDetails] = React.useState<ConnectionDetails | undefined>(
-    undefined,
+  const [attempt, setAttempt] = useState(0);
+  const [details, setDetails] = useState<ConnectionDetails>();
+  const [error, setError] = useState('');
+  const [micError, setMicError] = useState('');
+  const [ended, setEnded] = useState(false);
+  const room = useMemo(
+    () =>
+      new Room({
+        adaptiveStream: true,
+        dynacast: true,
+        audioCaptureDefaults: {
+          autoGainControl: true,
+          echoCancellation: true,
+          noiseSuppression: true,
+        },
+      }),
+    [],
   );
 
-  const handlePreJoinSubmit = React.useCallback(async (values: LocalUserChoices) => {
-    setPreJoinChoices(values);
+  useEffect(() => {
+    const controller = new AbortController();
+    setDetails(undefined);
+    setError('');
     const url = new URL(CONN_DETAILS_ENDPOINT, window.location.origin);
-    url.searchParams.append('roomName', props.roomName);
-    url.searchParams.append('participantName', values.username);
-    if (props.region) {
-      url.searchParams.append('region', props.region);
-    }
-    const connectionDetailsResp = await fetch(url.toString());
-    const connectionDetailsData = await connectionDetailsResp.json();
-    setConnectionDetails(connectionDetailsData);
-  }, []);
-  const handlePreJoinError = React.useCallback((e: any) => console.error(e), []);
+    url.searchParams.set('roomName', roomName);
+    url.searchParams.set('participantName', 'Guest');
+    fetch(url, { signal: controller.signal })
+      .then(async (response) => {
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || 'Could not create the room.');
+        setDetails(body);
+      })
+      .catch((reason) => {
+        if (reason.name !== 'AbortError') setError(reason.message || 'Could not connect.');
+      });
+    return () => controller.abort();
+  }, [roomName, attempt]);
+
+  useEffect(() => {
+    if (!details) return;
+    let active = true;
+    const onDisconnected = () => active && setEnded(true);
+    room.on(RoomEvent.Disconnected, onDisconnected);
+    room
+      .connect(details.serverUrl, details.participantToken, { autoSubscribe: true })
+      .then(async () => {
+        try {
+          await room.localParticipant.setMicrophoneEnabled(true);
+        } catch {
+          setMicError('Allow microphone access to talk, or type instead.');
+        }
+      })
+      .catch((reason) => active && setError(reason.message || 'The room could not connect.'));
+    return () => {
+      active = false;
+      room.off(RoomEvent.Disconnected, onDisconnected);
+      room.disconnect();
+    };
+  }, [details, room]);
+
+  const retry = () => {
+    setEnded(false);
+    setAttempt((value) => value + 1);
+  };
+
+  if (error) return <ConnectionState title="Connection lost" detail={error} onRetry={retry} />;
+  if (!details)
+    return (
+      <ConnectionState
+        title="Connecting to your agent…"
+        detail="Preparing a private LiveKit room and waking EchoRun."
+      />
+    );
 
   return (
-    <main data-lk-theme="default" style={{ height: '100%' }}>
-      {connectionDetails === undefined || preJoinChoices === undefined ? (
-        <div style={{ display: 'grid', placeItems: 'center', height: '100%' }}>
-          <PreJoin
-            defaults={preJoinDefaults}
-            onSubmit={handlePreJoinSubmit}
-            onError={handlePreJoinError}
-          />
-        </div>
-      ) : (
-        <VideoConferenceComponent
-          connectionDetails={connectionDetails}
-          userChoices={preJoinChoices}
-          options={{ codec: props.codec, hq: props.hq }}
-        />
-      )}
+    <RoomContext.Provider value={room}>
+      <RoomAudioRenderer />
+      <AgentSessionView
+        initialPrompt={initialPrompt}
+        micError={micError}
+        ended={ended}
+        onEnd={() => {
+          setEnded(true);
+          room.disconnect();
+        }}
+        onRetry={retry}
+      />
+    </RoomContext.Provider>
+  );
+}
+
+function ConnectionState({
+  title,
+  detail,
+  onRetry,
+}: {
+  title: string;
+  detail: string;
+  onRetry?: () => void;
+}) {
+  return (
+    <main className="connection-state">
+      <div className="connection-card">
+        <div className="skeleton-orb" />
+        <h1>{title}</h1>
+        <p>{detail}</p>
+        {onRetry && (
+          <button className="button button--primary" onClick={onRetry}>
+            <RotateCcw size={17} /> Retry
+          </button>
+        )}
+      </div>
     </main>
   );
 }
 
-function VideoConferenceComponent(props: {
-  userChoices: LocalUserChoices;
-  connectionDetails: ConnectionDetails;
-  options: {
-    hq: boolean;
-    codec: VideoCodec;
-  };
+function AgentSessionView({
+  initialPrompt,
+  micError,
+  ended,
+  onEnd,
+  onRetry,
+}: {
+  initialPrompt?: string;
+  micError: string;
+  ended: boolean;
+  onEnd: () => void;
+  onRetry: () => void;
 }) {
-  const keyProvider = new ExternalE2EEKeyProvider();
-  const { worker, e2eePassphrase } = useSetupE2EE();
-  const e2eeEnabled = !!(e2eePassphrase && worker);
-
-  const [e2eeSetupComplete, setE2eeSetupComplete] = React.useState(false);
-
-  const roomOptions = React.useMemo((): RoomOptions => {
-    let videoCodec: VideoCodec | undefined = props.options.codec ? props.options.codec : 'vp9';
-    if (e2eeEnabled && (videoCodec === 'av1' || videoCodec === 'vp9')) {
-      videoCodec = undefined;
-    }
-    const videoCaptureDefaults: VideoCaptureOptions = {
-      deviceId: props.userChoices.videoDeviceId ?? undefined,
-      resolution: props.options.hq ? VideoPresets.h2160 : VideoPresets.h720,
-    };
-    const publishDefaults: TrackPublishDefaults = {
-      dtx: false,
-      videoSimulcastLayers: props.options.hq
-        ? [VideoPresets.h1080, VideoPresets.h720]
-        : [VideoPresets.h540, VideoPresets.h216],
-      red: !e2eeEnabled,
-      videoCodec,
-    };
-    return {
-      videoCaptureDefaults: videoCaptureDefaults,
-      publishDefaults: publishDefaults,
-      audioCaptureDefaults: {
-        deviceId: props.userChoices.audioDeviceId ?? undefined,
-      },
-      adaptiveStream: true,
-      dynacast: true,
-      e2ee: keyProvider && worker && e2eeEnabled ? { keyProvider, worker } : undefined,
-      singlePeerConnection: true,
-    };
-  }, [props.userChoices, props.options.hq, props.options.codec]);
-
-  const room = React.useMemo(() => new Room(roomOptions), []);
-
-  React.useEffect(() => {
-    if (e2eeEnabled) {
-      keyProvider
-        .setKey(decodePassphrase(e2eePassphrase))
-        .then(() => {
-          room.setE2EEEnabled(true).catch((e) => {
-            if (e instanceof DeviceUnsupportedError) {
-              alert(
-                `You're trying to join an encrypted meeting, but your browser does not support it. Please update it to the latest version and try again.`,
-              );
-              console.error(e);
-            } else {
-              throw e;
-            }
-          });
-        })
-        .then(() => setE2eeSetupComplete(true));
-    } else {
-      setE2eeSetupComplete(true);
-    }
-  }, [e2eeEnabled, room, e2eePassphrase]);
-
-  const connectOptions = React.useMemo((): RoomConnectOptions => {
-    return {
-      autoSubscribe: true,
-    };
-  }, []);
-
-  React.useEffect(() => {
-    room.on(RoomEvent.Disconnected, handleOnLeave);
-    room.on(RoomEvent.EncryptionError, handleEncryptionError);
-    room.on(RoomEvent.MediaDevicesError, handleError);
-
-    if (e2eeSetupComplete) {
-      room
-        .connect(
-          props.connectionDetails.serverUrl,
-          props.connectionDetails.participantToken,
-          connectOptions,
-        )
-        .catch((error) => {
-          handleError(error);
-        });
-      if (props.userChoices.videoEnabled) {
-        room.localParticipant.setCameraEnabled(true).catch((error) => {
-          handleError(error);
-        });
-      }
-      if (props.userChoices.audioEnabled) {
-        room.localParticipant.setMicrophoneEnabled(true).catch((error) => {
-          handleError(error);
-        });
-      }
-    }
-    return () => {
-      room.off(RoomEvent.Disconnected, handleOnLeave);
-      room.off(RoomEvent.EncryptionError, handleEncryptionError);
-      room.off(RoomEvent.MediaDevicesError, handleError);
-    };
-  }, [e2eeSetupComplete, room, props.connectionDetails, props.userChoices]);
-
-  const lowPowerMode = useLowCPUOptimizer(room);
-
   const router = useRouter();
-  const handleOnLeave = React.useCallback(() => router.push('/'), [router]);
-  const handleError = React.useCallback((error: Error) => {
-    console.error(error);
-    // A missing or busy camera/microphone shouldn't interrupt joining: the
-    // call carries on with whatever device does work.
-    if (error.name === 'NotFoundError' || /device not found/i.test(error.message)) return;
-    alert(`Encountered an unexpected error, check the console logs for details: ${error.message}`);
-  }, []);
-  const handleEncryptionError = React.useCallback((error: Error) => {
-    console.error(error);
-    alert(
-      `Encountered an unexpected encryption error, check the console logs for details: ${error.message}`,
-    );
-  }, []);
+  const { state, audioTrack, agent } = useVoiceAssistant();
+  const events = useAgentEvents();
+  const transcriptions = useTranscriptions();
+  const { chatMessages, send, isSending } = useChat();
+  const { localParticipant, isMicrophoneEnabled, lastMicrophoneError } = useLocalParticipant();
+  const [message, setMessage] = useState('');
+  const [mobileTab, setMobileTab] = useState<MobileTab>('conversation');
+  const [waitingSeconds, setWaitingSeconds] = useState(0);
+  const sentInitialPrompt = useRef(false);
+  const duration = useCallDuration(ended);
+  const runningTool = [...events.tools].reverse().find((tool) => tool.status === 'running');
 
-  React.useEffect(() => {
-    if (lowPowerMode) {
-      console.warn('Low power mode enabled');
+  useEffect(() => {
+    if (agent) {
+      setWaitingSeconds(0);
+      return;
     }
-  }, [lowPowerMode]);
+    const timer = window.setInterval(() => setWaitingSeconds((seconds) => seconds + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [agent]);
+
+  useEffect(() => {
+    if (!agent || !initialPrompt || sentInitialPrompt.current) return;
+    sentInitialPrompt.current = true;
+    send(initialPrompt).catch(() => setMessage(initialPrompt));
+  }, [agent, initialPrompt, send]);
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    const next = message.trim();
+    if (!next) return;
+    setMessage('');
+    try {
+      await send(next);
+    } catch {
+      setMessage(next);
+    }
+  };
+
+  const toggleMic = useCallback(async () => {
+    try {
+      await localParticipant.setMicrophoneEnabled(!isMicrophoneEnabled);
+    } catch {
+      /* surfaced below */
+    }
+  }, [isMicrophoneEnabled, localParticipant]);
+
+  const stage: PipelineStage = runningTool
+    ? 'tools'
+    : state === 'speaking'
+      ? 'tts'
+      : state === 'thinking'
+        ? 'agent'
+        : state === 'listening'
+          ? 'stt'
+          : 'you';
+  const label = runningTool
+    ? `Using ${friendlyToolName(runningTool.tool)}`
+    : state === 'speaking'
+      ? 'Speaking'
+      : state === 'thinking'
+        ? 'Thinking'
+        : state === 'listening'
+          ? 'Listening'
+          : waitingSeconds >= 10
+            ? 'Waking up'
+            : 'Connecting';
+  const visibleMicError = micError || lastMicrophoneError?.message || '';
+
+  if (ended) {
+    return (
+      <SessionSummary
+        duration={duration}
+        toolCount={events.tools.length}
+        memoryCount={events.memories.length}
+        noteCount={events.notes.length}
+        onRestart={() => router.push('/')}
+      />
+    );
+  }
 
   return (
-    <div className="lk-room-container">
-      <RoomContext.Provider value={room}>
-        <KeyboardShortcuts />
-        <VideoConference
-          chatMessageFormatter={formatChatMessageLinks}
-          SettingsComponent={SHOW_SETTINGS_MENU ? SettingsMenu : undefined}
-        />
-        <DebugMode />
-        <RecordingIndicator />
-      </RoomContext.Provider>
+    <main className="session-shell">
+      <header className="session-topbar">
+        <Link className="wordmark" href="/">
+          <span className="wordmark__mark" />
+          {APP_NAME}
+        </Link>
+        <div className="session-topbar__status">
+          <span className="status-dot" /> LIVE · {formatDuration(duration)}
+        </div>
+      </header>
+      {(visibleMicError || waitingSeconds >= 25) && (
+        <div className="inline-notice" role="status" style={{ margin: '10px 14px 0' }}>
+          {waitingSeconds >= 25 ? (
+            <>
+              The agent is taking too long to join. <button onClick={onRetry}>Retry</button>
+            </>
+          ) : (
+            visibleMicError
+          )}
+        </div>
+      )}
+      <div className="session-grid">
+        <section className="session-panel" data-mobile-active={mobileTab === 'conversation'}>
+          <div className="panel-heading">
+            <h2>Conversation</h2>
+            <span>Live transcript</span>
+          </div>
+          <div className="conversation-feed">
+            {!transcriptions.length && !chatMessages.length ? (
+              <div className="conversation-empty">
+                Your conversation will appear here.
+                <br />
+                Try asking about the weather.
+              </div>
+            ) : (
+              <>
+                {transcriptions.map((item, index) => (
+                  <div
+                    className="transcript-line"
+                    data-agent={item.participantInfo.identity === agent?.identity}
+                    key={`${item.participantInfo.identity}-${index}`}
+                  >
+                    <span className="transcript-line__who">
+                      {item.participantInfo.identity === agent?.identity ? APP_NAME : 'You'}
+                    </span>
+                    <p>{item.text}</p>
+                  </div>
+                ))}
+                {chatMessages.map((item, index) => (
+                  <div
+                    className="transcript-line"
+                    data-agent={item.from?.identity === agent?.identity}
+                    key={`chat-${item.timestamp}-${index}`}
+                  >
+                    <span className="transcript-line__who">
+                      {item.from?.identity === agent?.identity ? APP_NAME : 'You · typed'}
+                    </span>
+                    <p>{item.message}</p>
+                  </div>
+                ))}
+              </>
+            )}
+          </div>
+          <form className="chat-form" onSubmit={submit}>
+            <input
+              value={message}
+              onChange={(event) => setMessage(event.target.value)}
+              placeholder="Type a message…"
+              aria-label="Message EchoRun"
+            />
+            <button
+              className="icon-button"
+              data-active={Boolean(message.trim())}
+              disabled={isSending}
+              type="submit"
+              aria-label="Send"
+            >
+              <Send size={17} />
+            </button>
+          </form>
+        </section>
+
+        <section className="session-panel session-panel--agent">
+          <div className="panel-heading">
+            <h2>Agent</h2>
+            <span>{agent ? 'Online' : 'Joining'}</span>
+          </div>
+          <div className="agent-stage">
+            <div className="agent-orb-wrap">
+              <div className="signal-orb agent-orb" data-state={state}>
+                <span className="signal-orb__ring signal-orb__ring--one" />
+                <span className="signal-orb__ring signal-orb__ring--two" />
+                <span className="signal-orb__core">
+                  {audioTrack ? (
+                    <BarVisualizer
+                      className="agent-visualizer"
+                      state={state}
+                      trackRef={audioTrack}
+                      barCount={5}
+                    />
+                  ) : (
+                    <Activity size={32} />
+                  )}
+                </span>
+              </div>
+            </div>
+            <div className="agent-state">
+              <h1>{label}</h1>
+              <p>
+                {runningTool
+                  ? 'A live tool call is in progress'
+                  : 'Interrupt anytime—EchoRun is listening'}
+              </p>
+            </div>
+            <div className="session-pipeline">
+              <Pipeline compact active={stage} />
+            </div>
+          </div>
+          <div className="session-controls">
+            <button
+              className="icon-button"
+              data-active={isMicrophoneEnabled}
+              onClick={toggleMic}
+              aria-label={isMicrophoneEnabled ? 'Mute microphone' : 'Unmute microphone'}
+            >
+              {isMicrophoneEnabled ? <Mic size={18} /> : <MicOff size={18} />}
+            </button>
+            <MediaDeviceSelect className="device-select" kind="audioinput" />
+            <button
+              className="icon-button icon-button--danger"
+              onClick={onEnd}
+              aria-label="End call"
+            >
+              <PhoneOff size={18} />
+            </button>
+          </div>
+        </section>
+
+        <section
+          className="session-panel"
+          data-mobile-active={mobileTab === 'activity' || mobileTab === 'memory'}
+        >
+          <div className="panel-heading">
+            <h2>{mobileTab === 'memory' ? 'Memory' : 'Activity'}</h2>
+            <span>{events.tools.length} tool calls</span>
+          </div>
+          {mobileTab !== 'memory' && (
+            <div className="activity-feed">
+              <AnimatePresence initial={false}>
+                {events.tools.length ? (
+                  events.tools.map((tool) => (
+                    <motion.article
+                      className="tool-entry"
+                      key={tool.id}
+                      initial={{ opacity: 0, y: 8 }}
+                      animate={{ opacity: 1, y: 0 }}
+                    >
+                      <div className="tool-entry__head">
+                        <div className="tool-entry__name">
+                          <Wrench size={13} />
+                          <span>{friendlyToolName(tool.tool)}</span>
+                        </div>
+                        <span className="tool-entry__time">
+                          {tool.status === 'running' ? 'running' : `${tool.ms ?? 0} ms`}
+                        </span>
+                      </div>
+                      {tool.status === 'running' && (
+                        <div className="tool-entry__pending">
+                          <span className="spinner" /> Working with{' '}
+                          {Object.values(tool.args).join(', ') || 'your request'}…
+                        </div>
+                      )}
+                      {tool.result && <ResultCard result={tool.result} />}
+                      {tool.error && (
+                        <div className="result-card result-card__error">{tool.error}</div>
+                      )}
+                    </motion.article>
+                  ))
+                ) : (
+                  <div className="activity-empty">
+                    Tool calls appear here in real time.
+                    <br />
+                    Ask for weather, news, markets, or a calculation.
+                  </div>
+                )}
+              </AnimatePresence>
+            </div>
+          )}
+          <details className="activity-drawer" open={mobileTab === 'memory'}>
+            <summary>
+              <span>
+                <Brain size={13} /> What I remember
+              </span>
+              <ChevronRight size={14} />
+            </summary>
+            <div className="activity-drawer__content">
+              {events.memories.length ? (
+                <ul className="memory-list">
+                  {events.memories.map((memory) => (
+                    <li key={memory}>{memory}</li>
+                  ))}
+                </ul>
+              ) : (
+                'Nothing saved yet. Tell EchoRun a stable preference to try memory.'
+              )}
+            </div>
+          </details>
+          <details className="activity-drawer" open={mobileTab === 'memory'}>
+            <summary>
+              <span>Notes</span>
+              <ChevronRight size={14} />
+            </summary>
+            <div className="activity-drawer__content">
+              {events.notes.length ? (
+                <ul className="memory-list">
+                  {events.notes.map((note) => (
+                    <li key={note}>{note}</li>
+                  ))}
+                </ul>
+              ) : (
+                'No notes yet.'
+              )}
+            </div>
+          </details>
+          <details className="activity-drawer">
+            <summary>
+              <span>Under the hood</span>
+              <ChevronRight size={14} />
+            </summary>
+            <div className="activity-drawer__content">
+              <MetricStrip metrics={events.metrics} />
+            </div>
+          </details>
+        </section>
+      </div>
+      <nav className="mobile-tabs" aria-label="Session panels">
+        {(['conversation', 'activity', 'memory'] as MobileTab[]).map((tab) => (
+          <button data-active={mobileTab === tab} onClick={() => setMobileTab(tab)} key={tab}>
+            {tab[0].toUpperCase() + tab.slice(1)}
+          </button>
+        ))}
+      </nav>
+    </main>
+  );
+}
+
+function MetricStrip({ metrics }: { metrics: ReturnType<typeof useAgentEvents>['metrics'] }) {
+  const items: [string, number][] = metrics
+    ? [
+        ['STT', metrics.stt_ms],
+        ['LLM', metrics.llm_ttft_ms],
+        ['TTS', metrics.tts_ttfb_ms],
+        ['End to end', metrics.e2e_ms],
+      ]
+    : [
+        ['STT', 0],
+        ['LLM', 0],
+        ['TTS', 0],
+        ['End to end', 0],
+      ];
+  return (
+    <div className="metric-strip">
+      {items.map(([label, value]) => (
+        <div className="metric" title={`${label} latency`} key={label}>
+          <b>
+            {value || '—'}
+            {value ? ' ms' : ''}
+          </b>
+          <span>{label}</span>
+        </div>
+      ))}
     </div>
   );
+}
+
+function SessionSummary({
+  duration,
+  toolCount,
+  memoryCount,
+  noteCount,
+  onRestart,
+}: {
+  duration: number;
+  toolCount: number;
+  memoryCount: number;
+  noteCount: number;
+  onRestart: () => void;
+}) {
+  return (
+    <main className="session-shell">
+      <div className="session-summary">
+        <div className="summary-card">
+          <p className="eyebrow">Session complete</p>
+          <h1>Good conversation.</h1>
+          <p>EchoRun has left the room. Your saved memories and notes will be ready next time.</p>
+          <div className="summary-stats">
+            <div>
+              <b>{formatDuration(duration)}</b>Duration
+            </div>
+            <div>
+              <b>{toolCount}</b>Tools used
+            </div>
+            <div>
+              <b>{memoryCount + noteCount}</b>Saved items
+            </div>
+          </div>
+          <button className="button button--primary" onClick={onRestart}>
+            Start another
+          </button>
+        </div>
+      </div>
+    </main>
+  );
+}
+
+function useCallDuration(paused: boolean) {
+  const [seconds, setSeconds] = useState(0);
+  useEffect(() => {
+    if (paused) return;
+    const timer = window.setInterval(() => setSeconds((value) => value + 1), 1000);
+    return () => clearInterval(timer);
+  }, [paused]);
+  return seconds;
+}
+
+function formatDuration(seconds: number) {
+  return `${Math.floor(seconds / 60)
+    .toString()
+    .padStart(2, '0')}:${(seconds % 60).toString().padStart(2, '0')}`;
+}
+function friendlyToolName(name: string) {
+  return name.replace(/_/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
