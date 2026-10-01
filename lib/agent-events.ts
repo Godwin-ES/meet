@@ -47,6 +47,14 @@ export type MemoryUpdatedEvent = {
   at: number;
 };
 
+/** The user's saved notes, sent when they connect (returning users see them straight away). */
+export type NotesUpdatedEvent = {
+  v: 1;
+  type: 'notes.updated';
+  notes: string[];
+  at: number;
+};
+
 export type TurnMetricsEvent = {
   v: 1;
   type: 'turn.metrics';
@@ -65,6 +73,7 @@ export type AgentEvent =
   | ToolCompletedEvent
   | ToolFailedEvent
   | MemoryUpdatedEvent
+  | NotesUpdatedEvent
   | TurnMetricsEvent;
 
 export type ToolActivity = {
@@ -111,6 +120,11 @@ export function parseAgentEvent(value: unknown): AgentEvent | null {
   if (value.type === 'memory.updated') {
     return Array.isArray(value.memories) && value.memories.every((item) => typeof item === 'string')
       ? (value as MemoryUpdatedEvent)
+      : null;
+  }
+  if (value.type === 'notes.updated') {
+    return Array.isArray(value.notes) && value.notes.every((item) => typeof item === 'string')
+      ? (value as NotesUpdatedEvent)
       : null;
   }
   if (value.type === 'turn.metrics') {
@@ -190,6 +204,8 @@ export function reduceAgentEvent(state: AgentEventState, event: AgentEvent): Age
       return { ...state, tools: upsertTool(state.tools, event) };
     case 'memory.updated':
       return { ...state, memories: event.memories };
+    case 'notes.updated':
+      return { ...state, notes: event.notes };
     case 'turn.metrics':
       return { ...state, metrics: event };
   }

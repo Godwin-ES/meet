@@ -127,6 +127,13 @@ describe('agent event protocol', () => {
     ).toBeNull();
   });
 
+  it('shows saved notes from notes.updated, sent on connect', () => {
+    const event = parseAgentEvent({ v: 1, type: 'notes.updated', notes: ['Email Sam'], at: 1 });
+    expect(event).not.toBeNull();
+    expect(reduceAgentEvent(INITIAL_AGENT_EVENT_STATE, event!).notes).toEqual(['Email Sam']);
+    expect(parseAgentEvent({ v: 1, type: 'notes.updated', notes: [1], at: 1 })).toBeNull();
+  });
+
   it('ignores unknown event types and future protocol versions', () => {
     expect(parseAgentEvent({ v: 2, type: 'tool.started' })).toBeNull();
     expect(parseAgentEvent({ v: 1, type: 'system.secret' })).toBeNull();

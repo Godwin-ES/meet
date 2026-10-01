@@ -30,6 +30,7 @@ import { Pipeline, PipelineStage } from '@/components/Pipeline';
 import { ResultCard } from '@/components/cards/ResultCard';
 import { APP_NAME } from '@/lib/app-config';
 import { useAgentEvents } from '@/lib/agent-events';
+import { mergeConversation } from '@/lib/conversation';
 import { ConnectionDetails } from '@/lib/types';
 
 const CONN_DETAILS_ENDPOINT =
@@ -213,6 +214,34 @@ function AgentSessionView({
     }
   };
 
+  const conversation = useMemo(
+    () => mergeConversation(transcriptions, chatMessages, agent?.identity),
+    [transcriptions, chatMessages, agent?.identity],
+  );
+
+  // When the user grants microphone access in the browser after joining,
+  // turn the mic on without making them find the button.
+  useEffect(() => {
+    if (isMicrophoneEnabled || !navigator.permissions?.query) return;
+    let status: PermissionStatus | undefined;
+    let cancelled = false;
+    const onChange = () => {
+      if (status?.state === 'granted') localParticipant.setMicrophoneEnabled(true).catch(() => {});
+    };
+    navigator.permissions
+      .query({ name: 'microphone' as PermissionName })
+      .then((result) => {
+        if (cancelled) return;
+        status = result;
+        result.addEventListener('change', onChange);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      status?.removeEventListener('change', onChange);
+    };
+  }, [isMicrophoneEnabled, localParticipant]);
+
   const toggleMic = useCallback(async () => {
     try {
       await localParticipant.setMicrophoneEnabled(!isMicrophoneEnabled);
@@ -241,7 +270,9 @@ function AgentSessionView({
           : waitingSeconds >= 10
             ? 'Waking up'
             : 'Connecting';
-  const visibleMicError = micError || lastMicrophoneError?.message || '';
+  // Cleared as soon as the microphone is actually on, e.g. after the user
+  // allows access and unmutes, or the permission listener above enables it.
+  const visibleMicError = isMicrophoneEnabled ? '' : micError || lastMicrophoneError?.message || '';
 
   if (ended) {
     return (
@@ -284,7 +315,7 @@ function AgentSessionView({
             <span>Live transcript</span>
           </div>
           <div className="conversation-feed">
-            {!transcriptions.length && !chatMessages.length ? (
+            {!conversation.length ? (
               <div className="conversation-empty">
                 Your conversation will appear here.
                 <br />
@@ -292,28 +323,12 @@ function AgentSessionView({
               </div>
             ) : (
               <>
-                {transcriptions.map((item, index) => (
-                  <div
-                    className="transcript-line"
-                    data-agent={item.participantInfo.identity === agent?.identity}
-                    key={`${item.participantInfo.identity}-${index}`}
-                  >
+                {conversation.map((line) => (
+                  <div className="transcript-line" data-agent={line.fromAgent} key={line.key}>
                     <span className="transcript-line__who">
-                      {item.participantInfo.identity === agent?.identity ? APP_NAME : 'You'}
+                      {line.fromAgent ? APP_NAME : line.typed ? 'You · typed' : 'You'}
                     </span>
-                    <p>{item.text}</p>
-                  </div>
-                ))}
-                {chatMessages.map((item, index) => (
-                  <div
-                    className="transcript-line"
-                    data-agent={item.from?.identity === agent?.identity}
-                    key={`chat-${item.timestamp}-${index}`}
-                  >
-                    <span className="transcript-line__who">
-                      {item.from?.identity === agent?.identity ? APP_NAME : 'You · typed'}
-                    </span>
-                    <p>{item.message}</p>
+                    <p>{line.text}</p>
                   </div>
                 ))}
               </>
