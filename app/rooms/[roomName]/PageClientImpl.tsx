@@ -46,7 +46,7 @@ export function PageClientImpl(props: {
   const preJoinDefaults = React.useMemo(() => {
     return {
       username: '',
-      videoEnabled: true,
+      videoEnabled: false,
       audioEnabled: true,
     };
   }, []);
@@ -202,6 +202,9 @@ function VideoConferenceComponent(props: {
   const handleOnLeave = React.useCallback(() => router.push('/'), [router]);
   const handleError = React.useCallback((error: Error) => {
     console.error(error);
+    // A missing or busy camera/microphone shouldn't interrupt joining: the
+    // call carries on with whatever device does work.
+    if (error.name === 'NotFoundError' || /device not found/i.test(error.message)) return;
     alert(`Encountered an unexpected error, check the console logs for details: ${error.message}`);
   }, []);
   const handleEncryptionError = React.useCallback((error: Error) => {
